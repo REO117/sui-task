@@ -6,6 +6,7 @@ import { AnimatePresence, motion, useMotionValue, useReducedMotion, useTransform
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronDown, Circle, Cloud, CloudOff, Download, Droplets, FileText, Flag, Inbox, LayoutGrid, LoaderCircle, LogOut, MoreHorizontal, Pin, Plus, RotateCcw, Search, Settings2, Sparkles, Trash2, X, CalendarDays, CheckCircle2, SlidersHorizontal, WifiOff } from 'lucide-react';
 import { db, migrateLocal, saveTask, syncTasks } from './db';
 import { readCachedUser, cacheUser, type User } from './identity';
+import Lessy, { readCompanionPreference, saveCompanionPreference } from './Lessy';
 import { advance, dateKey, labels, makeTask, statuses, type Status, type Task, type LocalTask, plainTask } from './model';
 import './style.css';
 
@@ -88,6 +89,9 @@ export default function App() {
   const [syncState, setSyncState] = useState<'local' | 'syncing' | 'synced' | 'error'>('local');
   const [online, setOnline] = useState(navigator.onLine);
   const [aiBusy, setAiBusy] = useState(false);
+  const [lessyEnabled, setLessyEnabled] = useState(readCompanionPreference);
+  const [completion, setCompletion] = useState(0);
+  const [typing, setTyping] = useState(false);
   const [suggestions, setSuggestions] = useState<Suggestion[] | null>(null);
   const [aiSelection, setAiSelection] = useState<Set<number>>(new Set());
   const [aiSource, setAiSource] = useState('');
@@ -222,6 +226,7 @@ export default function App() {
     try {
       const next = { ...task, ...patch, updatedAt: Math.max(Date.now(), task.updatedAt + 1) };
       await saveTask(workspaceRef.current, next); void runSync();
+      if (task.status !== 'done' && next.status === 'done' && !task.deleted && !next.deleted) setCompletion(value => value + 1);
       if (undo) notify(patch.deleted !== undefined ? patch.deleted ? 'ゴミ箱に移動しました' : '復元しました' : `${labels[next.status]}に変更しました`, () => { void update(next, { ...task, updatedAt: Date.now() }); });
       return true;
     } catch (e) { report(e); return false; }
@@ -287,7 +292,8 @@ export default function App() {
   const pinned = filtered.filter(t => t.pinned), rest = filtered.filter(t => !t.pinned);
   const renderCard = (t: LocalTask) => <TaskCard key={t.id} task={t} change={(patch, undo) => void update(t, patch, undo)} edit={() => setEditTask(t)} trash={view === 'trash'}/>;
 
-  return <div className="app-shell">
+  return <div className="app-shell" onFocusCapture={e => setTyping(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)}
+    onBlurCapture={e => setTyping(e.relatedTarget instanceof HTMLInputElement || e.relatedTarget instanceof HTMLTextAreaElement)}>
     <div className="ambient" aria-hidden="true"><div className="orb orb-one"/><div className="orb orb-two"/><div className="orb orb-three"/><div className="grain"/></div>
     <aside className="sidebar glass">
       <a className="brand" href="/" aria-label="Sui ホーム"><span className="brand-mark"><Droplets size={23}/></span><span>Sui<span className="brand-dot">.</span></span></a>
@@ -312,7 +318,7 @@ export default function App() {
         </div>
       </header>
       <main>
-        <div className="page-heading"><div><p className="date-line">{dateLabel}</p><h1>メモとタスク<span className="heading-dot"/></h1></div><button className="icon-button help-button glass" onClick={() => setHelp(true)} aria-label="操作方法"><ArrowRight size={18}/><ArrowLeft size={18}/></button></div>
+        <div className="page-heading"><div><p className="date-line">{dateLabel}</p><h1>メモとタスク<span className="heading-dot"/></h1></div><div className="heading-actions"><Lessy enabled={lessyEnabled} busy={aiBusy} completion={completion} typing={typing} obscured={!!(settings || help || editTask || suggestions)}/><button className="icon-button help-button glass" onClick={() => setHelp(true)} aria-label="操作方法"><ArrowRight size={18}/><ArrowLeft size={18}/></button></div></div>
         {error && <div className="error-banner" role="alert"><span>{error}</span><button className="icon-button" aria-label="エラーを閉じる" onClick={() => setError('')}><X size={16}/></button></div>}
         <section className="capture-section glass" aria-label="すぐにメモ" data-testid="composer">
           <div className="capture-heading"><span className="capture-icon"><Plus size={17}/></span><span>新しいメモ</span><span className="draft-indicator">{draft.trim() ? '下書き' : ''}</span></div>
@@ -347,6 +353,7 @@ export default function App() {
     {settings && <Modal title="設定" close={() => setSettings(false)}><div className="settings-account"><span className="settings-avatar">{user ? user.name.slice(0, 1) : <Cloud size={26}/>}</span><strong>{user ? user.name : 'アカウント'}</strong><p>{user ? user.email : 'Googleログインで端末間を同期'}</p></div>
       {user && sessionVerified ? <><div className="setting-row"><Cloud size={18}/><span>{!online ? 'オフライン・端末に保存中' : pendingCount ? `${pendingCount}件の同期待ち` : syncState === 'error' ? '同期できませんでした' : '同期済み'}</span><button onClick={() => void runSync()}>再同期</button></div><button className="setting-row" onClick={() => void logout()}><LogOut size={18}/><span>ログアウト</span></button></> : <button className="google-button" onClick={login} disabled={!online}><GoogleIcon/>Googleでログイン</button>}
       <div className="settings-divider"/><button className="setting-row" onClick={exportData}><Download size={18}/><span>データを書き出す</span><small>JSON</small></button>
+      <label className="setting-row lessy-setting"><Droplets size={18}/><span>レッシィを表示</span><input type="checkbox" role="switch" checked={lessyEnabled} onChange={e => { setLessyEnabled(e.target.checked); saveCompanionPreference(e.target.checked); }}/></label>
       {updateAvailable && <button className="setting-row" onClick={() => void applyUpdate()}><RotateCcw size={18}/><span>新しいバージョンに更新</span></button>}
       <a className="setting-row" href="/privacy.html" target="_blank" rel="noopener noreferrer"><FileText size={18}/><span>プライバシー</span></a>
       {installPrompt && <button className="setting-row" onClick={() => { void installPrompt.prompt(); setInstallPrompt(null); }}><Plus size={18}/><span>ホーム画面に追加</span></button>}
