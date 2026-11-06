@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f6f8fa"><title>プライバシー — Sui</title><style>body{font-family:system-ui,-apple-system,sans-serif;line-height:1.9;background:#f6f8fa;color:#34465d;margin:0}main{max-width:720px;margin:auto;padding:48px 24px 72px}h1{font-size:25px;margin:24px 0 32px}h2{font-size:17px;margin-top:32px}p,li{font-size:14px}a{color:#456d9f}nav a{display:inline-flex;align-items:center;min-height:44px}small{color:#6d8097}</style></head><body><main><nav><a href="/">Suiへ戻る</a></nav><h1>プライバシー</h1>
+<p>Suiは、メモとタスクの保存、Googleログイン、端末間の同期、利用者が選んだメモのAI整理に必要な情報を取り扱います。</p>
+<h2>保存する情報と目的</h2><ul><li>メモ・タスクの本文、状態、期限、カテゴリ、ピン留め、作成・更新日時を、表示・編集・同期のために保存します。</li><li>Googleログインでは、Googleアカウントの識別子、表示名、メールアドレスを取得し、本人確認と利用者ごとのデータ分離に使用します。Googleのパスワードは取得しません。Gmail、Google Drive、Googleカレンダーの内容を取得する権限は要求しません。</li><li>ログイン状態の管理に、JavaScriptから読み取れないセッションCookieを使用します。</li></ul>
+<h2>端末内とクラウドの保存</h2><p>ログイン前のメモと下書きは、そのブラウザのIndexedDBに保存します。Googleログイン時に、この端末の未ログインのメモをログインしたアカウントの保存領域へ移し、Cloudflare D1へ同期します。通信できない間の変更は端末に残し、接続後に同期を試みます。ブラウザのサイトデータを消すと、未同期のデータは失われます。</p>
+<h2>AIでの整理</h2><p>「AIで整理」を実行した場合に、そのメモの本文と日付の基準をCloudflare Workers AIへ送信します。Googleから取得したプロフィール情報をAIの入力として自動送信することはありません。通常のメモ保存だけではAIを呼び出しません。生成した候補は、利用者が追加操作を行うまでタスクとして確定しません。</p>
+<h2>利用する外部サービス</h2><p>本人確認にGoogle、アプリ配信・データ保存・AI処理にCloudflareを利用します。通信やサービスの保護に必要な情報は、各サービスでも処理されます。Suiのコードは、広告配信や行動分析のための第三者トラッキングを組み込んでいません。</p>
+<h2>データの管理</h2><p>設定画面から、現在の保存領域のデータをJSON形式で書き出せます。ゴミ箱への移動は復元できる削除であり、クラウドからの完全消去ではありません。Googleログイン画面に表示されるサポートメールから、保存データの削除を依頼できます。Googleアカウント側でもSuiの接続を取り消せます。接続の取り消しだけでは、保存済みタスクは自動消去されません。</p>
+<p><small>Sui 1.0</small></p></main></body></html>
