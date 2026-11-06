@@ -235,7 +235,7 @@ export default function App() {
     if (!draft.trim() || aiBusy || suggestions) return;
     if (!online) { notify('AIでの整理はオンラインで使えます'); return; }
     if (!user || !sessionVerified) { setSettings(true); return; }
-    setAiBusy(true); setAiSource(draft);
+    setError(''); setAiBusy(true); setAiSource(draft);
     try {
       const response = await fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: draft, today: dateKey() }) });
       const data = await response.json() as { error?: string; tasks: Suggestion[] };
