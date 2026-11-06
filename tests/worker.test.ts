@@ -9,10 +9,10 @@ let env: Env;
 const host = 'https://sui.example';
 const fakeToken = 'test-only-session-not-a-real-secret';
 const fakeTokenB = 'test-only-other-user';
-function request(path: string, body?: unknown, token = fakeToken, origin = host) {
+function request(path: string, body?: unknown, token = fakeToken, origin = host, override: Partial<Env> = {}) {
   return app.request(`${host}${path}`, body === undefined ? { headers: { Cookie: `sui_session=${token}` } } : {
     method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json', Cookie: `sui_session=${token}` }, body: JSON.stringify(body)
-  }, env);
+  }, { ...env, ...override });
 }
 beforeAll(async () => {
   mf = new Miniflare(convertV4MiniflareOptions({ modules: true, script: 'export default { fetch(){ return new Response("ok") } }', d1Databases: ['DB'], compatibilityDate: '2026-11-06' }));
@@ -25,13 +25,15 @@ beforeAll(async () => {
     database.prepare('INSERT INTO sessions VALUES(?,?,?)').bind(await hash(fakeToken), 'user-a', Date.now() + 600000),
     database.prepare('INSERT INTO sessions VALUES(?,?,?)').bind(await hash(fakeTokenB), 'user-b', Date.now() + 600000)
   ]);
-  env = { DB: database, APP_ORIGIN: host, ASSETS: {} as Fetcher } as Env;
+  env = { DB: database, APP_ORIGIN: host, ALLOWED_GOOGLE_EMAIL: 'a@example.com', ASSETS: {} as Fetcher } as Env;
 }, 30000);
 afterAll(async () => { await mf?.dispose(); });
 
 describe('認証・送信元の保護', () => {
   it('未ログインの本人情報はnull', async () => { expect(await (await request('/api/me', undefined, '')).json()).toEqual({ user: null }); });
   it('セッションから本人情報を取得', async () => { expect(await (await request('/api/me')).json()).toMatchObject({ user: { id: 'user-a' } }); });
+  it('本人以外は既存セッションがあっても拒否する', async () => { expect((await request('/api/sync', { tasks: [] }, fakeTokenB)).status).toBe(401); expect(await (await request('/api/me', undefined, fakeTokenB)).json()).toEqual({ user: null }); });
+  it('本人限定の設定がない場合はログインを認めない', async () => { expect((await request('/api/sync', { tasks: [] }, fakeToken, host, { ALLOWED_GOOGLE_EMAIL: undefined })).status).toBe(401); });
   it('偽のセッションは同期不可', async () => { expect((await request('/api/sync', { tasks: [] }, 'forged')).status).toBe(401); });
   it('別の送信元は拒否', async () => { expect((await request('/api/sync', { tasks: [] }, fakeToken, 'https://evil.example')).status).toBe(403); });
   it('Originなしの変更操作は拒否', async () => {
@@ -53,10 +55,10 @@ describe('D1の保存・同期', () => {
     expect(await r.json()).toMatchObject({ userId: 'user-a', tasks: [task] });
   });
   it('他の利用者から取得できない', async () => {
-    const data = await (await request('/api/sync', { tasks: [] }, fakeTokenB)).json(); expect(data).toEqual({ userId: 'user-b', tasks: [] });
+    const data = await (await request('/api/sync', { tasks: [] }, fakeTokenB, host, { ALLOWED_GOOGLE_EMAIL: 'b@example.com' })).json(); expect(data).toEqual({ userId: 'user-b', tasks: [] });
   });
   it('他利用者が同じIDを書いても元のデータは変更されない', async () => {
-    await request('/api/sync', { tasks: [{ ...task, text: '別ユーザーのデータ' }] }, fakeTokenB);
+    await request('/api/sync', { tasks: [{ ...task, text: '別ユーザーのデータ' }] }, fakeTokenB, host, { ALLOWED_GOOGLE_EMAIL: 'b@example.com' });
     const data = await (await request('/api/sync', { tasks: [] })).json() as { tasks: { text: string }[] };
     expect(data.tasks[0].text).toBe(task.text);
   });

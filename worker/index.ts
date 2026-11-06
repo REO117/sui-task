@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { taskSchema, type Task } from '../src/model';
 
 export type Env = { DB: D1Database; AI: Ai; ASSETS: Fetcher; GOOGLE_CLIENT_ID?: string;
-  GOOGLE_CLIENT_SECRET?: string; APP_ORIGIN?: string; AI_MODEL?: string };
+  GOOGLE_CLIENT_SECRET?: string; ALLOWED_GOOGLE_EMAIL?: string; APP_ORIGIN?: string; AI_MODEL?: string };
 type User = { id: string; email: string; name: string };
 const app = new Hono<{ Bindings: Env; Variables: { user: User } }>();
 const googleKeys = createRemoteJWKSet(new URL('https://www.googleapis.com/oauth2/v3/certs'));
@@ -14,7 +14,8 @@ const base64url = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).rep
 const random = () => base64url(crypto.getRandomValues(new Uint8Array(32)));
 export async function hash(value: string) { return base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))); }
 const origin = (env: Env, url: string) => env.APP_ORIGIN || new URL(url).origin;
-const configured = (env: Env) => Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.APP_ORIGIN);
+const configured = (env: Env) => Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.ALLOWED_GOOGLE_EMAIL && env.APP_ORIGIN);
+const allowedEmail = (env: Env, email: string) => Boolean(env.ALLOWED_GOOGLE_EMAIL && email.toLowerCase() === env.ALLOWED_GOOGLE_EMAIL.trim().toLowerCase());
 
 app.use('*', async (c, next) => {
   await next();
@@ -37,7 +38,7 @@ app.get('/api/me', async c => {
   if (!token) return c.json({ user: null });
   const user = await c.env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?')
     .bind(await hash(token), Date.now()).first<User>();
-  return c.json({ user: user || null });
+  return c.json({ user: user && allowedEmail(c.env, user.email) ? user : null });
 });
 app.get('/auth/google', async c => {
   if (!configured(c.env)) return c.redirect('/?auth_error=setup');
@@ -72,6 +73,7 @@ app.get('/auth/callback', async c => {
     const { payload } = await jwtVerify(tokens.id_token, googleKeys, { audience: c.env.GOOGLE_CLIENT_ID,
       issuer: ['https://accounts.google.com', 'accounts.google.com'] });
     if (payload.nonce !== saved.nonce || !payload.sub || payload.email_verified !== true || typeof payload.email !== 'string') throw new Error('invalid-identity');
+    if (!allowedEmail(c.env, payload.email)) return c.redirect('/?auth_error=forbidden');
     const token = random();
     await c.env.DB.batch([
       c.env.DB.prepare('INSERT INTO users(id,email,name) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,name=excluded.name')
@@ -87,7 +89,7 @@ app.use('/api/*', async (c, next) => {
   if (!token) return c.json({ error: 'Googleログインが必要です' }, 401);
   const user = await c.env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?')
     .bind(await hash(token), Date.now()).first<User>();
-  if (!user) return c.json({ error: 'ログインし直してください' }, 401);
+  if (!user || !allowedEmail(c.env, user.email)) return c.json({ error: 'このGoogleアカウントは許可されていません' }, 401);
   c.set('user', user);
   await next();
 });

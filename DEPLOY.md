@@ -24,17 +24,19 @@ Google Cloudにアプリ専用のプロジェクトを作り、Google Auth Platf
 https://<公開ホスト>/auth/callback
 ```
 
-Googleログイン以外のAPI権限は追加しない。テスト公開の間は、利用するGoogleアカウントをテストユーザーへ追加する。一般公開する場合は、Google側の公開状態と対象ユーザーを別途確認する。
+Googleログイン以外のAPI権限は追加しない。このアプリは本人限定で運用する。Google側は「テスト中」のまま、本人のGoogleアカウント1件だけをテストユーザーへ追加する。OAuthの一般公開へは変更しない。
 
 クライアントIDとクライアントシークレットはWranglerのsecretとして登録する。値をコマンド引数、GitHub、チャット、スクリーンショット、公開コードへ残さない。
 
 ```sh
 npx wrangler secret put GOOGLE_CLIENT_ID
 npx wrangler secret put GOOGLE_CLIENT_SECRET
+npx wrangler secret put ALLOWED_GOOGLE_EMAIL
 ```
 
 APP_ORIGINに最終的なHTTPS公開URLを設定して、再公開する。
 APP_ORIGINはCookie・送信元確認・Googleへの戻り先に使用するため、URLを変更したらGoogle側も更新する。
+ALLOWED_GOOGLE_EMAILには本人のGoogleアカウントのメールアドレスを設定する。Google側の許可リストとは別に、サーバーでも本人限定を強制する。
 
 ## 3. Workers AI
 

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useLiveQuery } from 'dexie-react-hooks';
+import { useRegisterSW } from 'virtual:pwa-register/react';
 import { AnimatePresence, motion, useMotionValue, useReducedMotion, useTransform } from 'motion/react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronDown, Circle, Cloud, CloudOff, Download, Droplets, FileText, Flag, Inbox, LayoutGrid, LoaderCircle, LogOut, MoreHorizontal, Pin, Plus, RotateCcw, Search, Settings2, Sparkles, Trash2, X, CalendarDays, CheckCircle2, SlidersHorizontal, WifiOff } from 'lucide-react';
 import { db, migrateLocal, saveTask, syncTasks } from './db';
@@ -92,6 +93,10 @@ export default function App() {
   const [installPrompt, setInstallPrompt] = useState<(Event & { prompt: () => Promise<void> }) | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const search = useRef<HTMLInputElement>(null);
+  const serviceWorker = useRef<ServiceWorkerRegistration | null>(null);
+  const { needRefresh: [updateAvailable], updateServiceWorker } = useRegisterSW({
+    onRegisteredSW: (_, registration) => { serviceWorker.current = registration || null; }
+  });
   const touched = useRef(false);
   const draftWrites = useRef(Promise.resolve());
   const workspaceRef = useRef('local');
@@ -137,11 +142,11 @@ export default function App() {
     const params = new URLSearchParams(location.search);
     if (params.has('auth_error')) {
       const code = params.get('auth_error');
-      setError(code === 'setup' ? 'Googleログインは接続設定待ちです。メモはこの端末に保存できます' : 'Googleログインを完了できませんでした。もう一度試してください');
+      setError(code === 'setup' ? 'Googleログインは接続設定待ちです。メモはこの端末に保存できます' : code === 'forbidden' ? 'このGoogleアカウントは許可されていません' : 'Googleログインを完了できませんでした。もう一度試してください');
       history.replaceState(null, '', location.pathname);
     }
     const onConnection = () => { setOnline(navigator.onLine); if (navigator.onLine) void runSync(); };
-    const onFocus = () => void runSync();
+    const onFocus = () => { void runSync(); void serviceWorker.current?.update().catch(() => {}); };
     const onInstall = (e: Event) => { e.preventDefault(); setInstallPrompt(e as Event & { prompt: () => Promise<void> }); };
     const keys = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -186,7 +191,7 @@ export default function App() {
     } catch (e) { report(e); return false; }
   }
   async function organize() {
-    if (!draft.trim() || aiBusy) return;
+    if (!draft.trim() || aiBusy || suggestions) return;
     if (!user) { setSettings(true); return; }
     setAiBusy(true); setAiSource(draft);
     try {
@@ -218,6 +223,11 @@ export default function App() {
   function login() {
     if (config && !config.google) { setError('Googleログインは接続設定待ちです。メモはこの端末に保存できます'); return; }
     void draftWrites.current.finally(() => { location.href = '/auth/google'; });
+  }
+  async function applyUpdate() {
+    if (editTask || saving || aiBusy) { notify('編集中の内容を保存してから更新してください'); return; }
+    await draftWrites.current;
+    await updateServiceWorker(true);
   }
   function exportData() {
     const blob = new Blob([JSON.stringify({ version: 1, tasks: (all || []).map(plainTask) }, null, 2)], { type: 'application/json' });
@@ -258,6 +268,7 @@ export default function App() {
         <div className="header-actions"><button className={`sync-indicator ${!online || syncState === 'error' ? 'muted' : ''}`} onClick={() => user ? void runSync() : setSettings(true)} aria-label="同期状態">
           {!online ? <WifiOff size={15}/> : syncState === 'syncing' ? <LoaderCircle size={15} className="spin"/> : user ? <Cloud size={15}/> : <CloudOff size={15}/>}
           <span>{!online ? 'オフライン' : !user ? '端末に保存' : syncState === 'error' ? '再同期' : syncState === 'syncing' || pendingCount ? '同期中' : '同期済み'}</span></button>
+          {updateAvailable && <button className="update-pill" onClick={() => void applyUpdate()} aria-label="新しいバージョンに更新"><RotateCcw size={13}/><span>更新</span></button>}
           <span className="top-divider"/><button className="avatar mobile-profile" onClick={() => setSettings(true)} aria-label="アカウント設定">{user ? user.name.slice(0, 1) : <Settings2 size={17}/>}</button>
         </div>
       </header>
@@ -292,11 +303,12 @@ export default function App() {
     </div>
     <nav className="mobile-nav glass" aria-label="モバイルナビゲーション">{[{ id: 'all' as View, icon: LayoutGrid, title: 'すべて' }, { id: 'today' as View, icon: CalendarDays, title: '今日' }, { id: 'inbox' as View, icon: FileText, title: 'メモ' }, { id: 'done' as View, icon: CheckCheck, title: '完了' }].map(n => <button key={n.id} className={view === n.id ? 'active' : ''} onClick={() => { setView(n.id); setQuery(''); }} aria-current={view === n.id ? 'page' : undefined}>{view === n.id && <motion.span layoutId="mobile-active" className="mobile-active" transition={easing}/>}<n.icon size={21}/><span>{n.title}</span></button>)}</nav>
     <AnimatePresence>{!all && <motion.div className="full-skeleton" data-testid="full-skeleton" initial={{ opacity: 1 }} exit={{ opacity: 0 }} aria-label="読み込み中" role="status"><div className="skeleton-sidebar"/><div className="skeleton-body"><div className="skeleton-line skeleton-title"/><div className="skeleton-space"/><div className="skeleton-stats"/><div className="skeleton-line"/>{[0, 1, 2, 3].map(i => <div key={i} className="skeleton-card"/>)}</div></motion.div>}</AnimatePresence>
-    <AnimatePresence>{toast && <motion.div className="toast glass" role="status" initial={{ y: 20, opacity: 0, scale: .95 }} animate={{ y: 0, opacity: 1, scale: 1 }} exit={{ y: 8, opacity: 0 }}><CheckCircle2 size={18}/><span>{toast.message}</span>{toast.undo && <button onClick={() => { toast.undo?.(); setToast(null); }}>元に戻す</button>}<button className="toast-close" aria-label="通知を閉じる" onClick={() => setToast(null)}><X size={14}/></button></motion.div>}</AnimatePresence>
+    <AnimatePresence>{toast && <motion.div className="toast glass" role="status" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: .18 }}><CheckCircle2 size={18}/><span>{toast.message}</span>{toast.undo && <button onClick={() => { toast.undo?.(); setToast(null); }}>元に戻す</button>}<button className="toast-close" aria-label="通知を閉じる" onClick={() => setToast(null)}><X size={14}/></button></motion.div>}</AnimatePresence>
     {editTask && <Editor task={editTask} close={() => setEditTask(null)} save={async patch => { if (await update(editTask, patch)) setEditTask(null); }} remove={async () => { if (await update(editTask, { deleted: true }, true)) setEditTask(null); }} restore={async () => { if (await update(editTask, { deleted: false }, true)) setEditTask(null); }}/ >}
     {settings && <Modal title="設定" close={() => setSettings(false)}><div className="settings-account"><span className="settings-avatar">{user ? user.name.slice(0, 1) : <Cloud size={26}/>}</span><strong>{user ? user.name : 'アカウント'}</strong><p>{user ? user.email : 'Googleログインで端末間を同期'}</p></div>
       {user ? <><div className="setting-row"><Cloud size={18}/><span>{!online ? 'オフライン・端末に保存中' : pendingCount ? `${pendingCount}件の同期待ち` : syncState === 'error' ? '同期できませんでした' : '同期済み'}</span><button onClick={() => void runSync()}>再同期</button></div><button className="setting-row" onClick={() => void logout()}><LogOut size={18}/><span>ログアウト</span></button></> : <button className="google-button" onClick={login}><GoogleIcon/>Googleでログイン</button>}
       <div className="settings-divider"/><button className="setting-row" onClick={exportData}><Download size={18}/><span>データを書き出す</span><small>JSON</small></button>
+      {updateAvailable && <button className="setting-row" onClick={() => void applyUpdate()}><RotateCcw size={18}/><span>新しいバージョンに更新</span></button>}
       <a className="setting-row" href="/privacy.html" target="_blank" rel="noopener noreferrer"><FileText size={18}/><span>プライバシー</span></a>
       {installPrompt && <button className="setting-row" onClick={() => { void installPrompt.prompt(); setInstallPrompt(null); }}><Plus size={18}/><span>ホーム画面に追加</span></button>}
       <button className="setting-row" onClick={() => { setSettings(false); setHelp(true); }}><ArrowRight size={18}/><span>操作方法</span></button><button className="setting-row" onClick={() => { setSettings(false); setView('trash'); }}><Trash2 size={18}/><span>ゴミ箱</span><small>{counts.trash}件</small></button>
