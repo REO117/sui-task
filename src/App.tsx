@@ -5,11 +5,11 @@ import { useRegisterSW } from 'virtual:pwa-register/react';
 import { AnimatePresence, motion, useMotionValue, useReducedMotion, useTransform } from 'motion/react';
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Check, CheckCheck, ChevronDown, Circle, Cloud, CloudOff, Download, Droplets, FileText, Flag, Inbox, LayoutGrid, LoaderCircle, LogOut, MoreHorizontal, Pin, Plus, RotateCcw, Search, Settings2, Sparkles, Trash2, X, CalendarDays, CheckCircle2, SlidersHorizontal, WifiOff } from 'lucide-react';
 import { db, migrateLocal, saveTask, syncTasks } from './db';
+import { readCachedUser, cacheUser, type User } from './identity';
 import { advance, dateKey, labels, makeTask, statuses, type Status, type Task, type LocalTask, plainTask } from './model';
 import './style.css';
 
 type View = 'all' | Status | 'today' | 'trash';
-type User = { id: string; name: string; email: string };
 type Suggestion = { text: string; category: Task['category']; due: string | null };
 type Toast = { message: string; undo?: () => void };
 const icons = { inbox: FileText, todo: Circle, doing: LoaderCircle, done: CheckCheck };
@@ -69,8 +69,9 @@ function TaskCard({ task, change, edit, trash }: { task: Task; change: (patch: P
 }
 
 export default function App() {
-  const [workspace, setWorkspace] = useState('local');
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(readCachedUser);
+  const [workspace, setWorkspace] = useState(() => user ? `user:${user.id}` : 'local');
+  const [sessionVerified, setSessionVerified] = useState(false);
   const [config, setConfig] = useState<{ google: boolean; ai: boolean } | null>(null);
   const [view, setView] = useState<View>('all');
   const [query, setQuery] = useState('');
@@ -99,7 +100,11 @@ export default function App() {
   });
   const touched = useRef(false);
   const draftWrites = useRef(Promise.resolve());
-  const workspaceRef = useRef('local');
+  const workspaceRef = useRef(workspace);
+  const verifiedSession = useRef(false);
+  const identityEpoch = useRef(0);
+  const loggingOut = useRef(false);
+  const refreshIdentity = useRef<() => Promise<void>>(async () => {});
   const all = useLiveQuery(() => db.tasks.where('workspace').equals(workspace).toArray(), [workspace]);
   const pendingCount = useLiveQuery(() => db.outbox.where('workspace').equals(workspace).count(), [workspace]) || 0;
   const reduced = useReducedMotion();
@@ -117,7 +122,8 @@ export default function App() {
 
   const runSync = useCallback(async () => {
     const w = workspaceRef.current;
-    if (w === 'local') return;
+    if (w === 'local' || !navigator.onLine) return;
+    if (!verifiedSession.current) { await refreshIdentity.current(); return; }
     setSyncState('syncing');
     try { await syncTasks(w); setSyncState(navigator.onLine ? 'synced' : 'local'); }
     catch { setSyncState('error'); }
@@ -125,28 +131,58 @@ export default function App() {
 
   useEffect(() => {
     let live = true;
-    db.drafts.get('local').then(d => { if (live && !touched.current && d) setDraft(d.text); }).catch(report);
+    let identifying = false;
+    db.drafts.get(workspaceRef.current).then(d => { if (live && !touched.current && d) setDraft(d.text); }).catch(report);
     fetch('/api/config').then(r => r.ok ? r.json() as Promise<{ google: boolean; ai: boolean }> : null).then(c => { if (live) setConfig(c); }).catch(() => {});
-    fetch('/api/me').then(r => r.ok ? r.json() as Promise<{ user: User | null }> : { user: null }).then(async result => {
-      if (!live || !result.user) return;
-      const w = `user:${result.user.id}`;
-      await draftWrites.current;
-      await migrateLocal(w);
-      if (!live) return;
-      workspaceRef.current = w;
-      setWorkspace(w); setUser(result.user);
-      const d = await db.drafts.get(w);
-      if (live) setDraft(d?.text || '');
-      void runSync();
-    }).catch(() => {});
+    async function identify() {
+      if (!live || identifying || loggingOut.current || !navigator.onLine) return;
+      identifying = true;
+      const epoch = identityEpoch.current;
+      try {
+        const response = await fetch('/api/me');
+        if (!response.ok) throw new Error('本人確認に接続できませんでした');
+        const result = await response.json() as { user: User | null };
+        if (!live || epoch !== identityEpoch.current) return;
+        if (result.user) {
+          const w = `user:${result.user.id}`;
+          if (workspaceRef.current !== w) {
+            await draftWrites.current;
+            await migrateLocal(w);
+            if (!live || epoch !== identityEpoch.current) return;
+            workspaceRef.current = w; setWorkspace(w);
+            const d = await db.drafts.get(w);
+            if (live) setDraft(d?.text || '');
+          }
+          cacheUser(result.user); setUser(result.user);
+          verifiedSession.current = true; setSessionVerified(true);
+          await runSync();
+        } else {
+          verifiedSession.current = false; setSessionVerified(false); cacheUser(null); setUser(null);
+          if (workspaceRef.current !== 'local') {
+            await draftWrites.current;
+            workspaceRef.current = 'local'; setWorkspace('local');
+            const d = await db.drafts.get('local');
+            if (live) setDraft(d?.text || '');
+          }
+          setSyncState('local');
+        }
+      } catch { if (live) setSyncState('error'); }
+      finally { identifying = false; }
+    }
+    refreshIdentity.current = identify;
+    void identify();
     const params = new URLSearchParams(location.search);
     if (params.has('auth_error')) {
       const code = params.get('auth_error');
       setError(code === 'setup' ? 'Googleログインは接続設定待ちです。メモはこの端末に保存できます' : code === 'forbidden' ? 'このGoogleアカウントは許可されていません' : 'Googleログインを完了できませんでした。もう一度試してください');
       history.replaceState(null, '', location.pathname);
     }
-    const onConnection = () => { setOnline(navigator.onLine); if (navigator.onLine) void runSync(); };
-    const onFocus = () => { void runSync(); void serviceWorker.current?.update().catch(() => {}); };
+    const onConnection = () => {
+      setOnline(navigator.onLine);
+      if (navigator.onLine) { verifiedSession.current = false; setSessionVerified(false); void identify(); }
+      else setSyncState('local');
+    };
+    const onFocus = () => { void identify(); void serviceWorker.current?.update().catch(() => {}); };
     const onInstall = (e: Event) => { e.preventDefault(); setInstallPrompt(e as Event & { prompt: () => Promise<void> }); };
     const keys = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -158,7 +194,7 @@ export default function App() {
     window.addEventListener('focus', onFocus); window.addEventListener('beforeinstallprompt', onInstall);
     window.addEventListener('keydown', keys);
     const timer = setInterval(() => void runSync(), 15000);
-    return () => { live = false; clearInterval(timer); window.removeEventListener('online', onConnection); window.removeEventListener('offline', onConnection);
+    return () => { live = false; refreshIdentity.current = async () => {}; clearInterval(timer); window.removeEventListener('online', onConnection); window.removeEventListener('offline', onConnection);
       window.removeEventListener('focus', onFocus); window.removeEventListener('beforeinstallprompt', onInstall); window.removeEventListener('keydown', keys); };
   }, [runSync]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(null), 6000); return () => clearTimeout(timer); }, [toast]);
@@ -192,7 +228,8 @@ export default function App() {
   }
   async function organize() {
     if (!draft.trim() || aiBusy || suggestions) return;
-    if (!user) { setSettings(true); return; }
+    if (!online) { notify('AIでの整理はオンラインで使えます'); return; }
+    if (!user || !sessionVerified) { setSettings(true); return; }
     setAiBusy(true); setAiSource(draft);
     try {
       const response = await fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: draft, today: dateKey() }) });
@@ -212,13 +249,15 @@ export default function App() {
     } catch (e) { report(e); } finally { setSaving(false); }
   }
   async function logout() {
+    loggingOut.current = true; identityEpoch.current += 1;
     try {
       const response = await fetch('/api/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       if (!response.ok) throw new Error('ログアウトできませんでした');
       await draftWrites.current;
+      cacheUser(null); verifiedSession.current = false; setSessionVerified(false);
       setUser(null); workspaceRef.current = 'local'; setWorkspace('local'); setDraft(''); touched.current = false;
       setSyncState('local'); setSettings(false); notify('ログアウトしました');
-    } catch (e) { report(e); }
+    } catch (e) { report(e); } finally { loggingOut.current = false; }
   }
   function login() {
     if (config && !config.google) { setError('Googleログインは接続設定待ちです。メモはこの端末に保存できます'); return; }
@@ -267,7 +306,7 @@ export default function App() {
         <div className="breadcrumb"><span className="mobile-brand"><Droplets size={21}/>Sui.</span><span className="desktop-only">ワークスペース</span><span className="breadcrumb-slash">/</span><strong>{mainTitle}</strong></div>
         <div className="header-actions"><button className={`sync-indicator ${!online || syncState === 'error' ? 'muted' : ''}`} onClick={() => user ? void runSync() : setSettings(true)} aria-label="同期状態">
           {!online ? <WifiOff size={15}/> : syncState === 'syncing' ? <LoaderCircle size={15} className="spin"/> : user ? <Cloud size={15}/> : <CloudOff size={15}/>}
-          <span>{!online ? 'オフライン' : !user ? '端末に保存' : syncState === 'error' ? '再同期' : syncState === 'syncing' || pendingCount ? '同期中' : '同期済み'}</span></button>
+          <span>{!online ? 'オフライン' : !user ? '端末に保存' : !sessionVerified ? syncState === 'error' ? 'ログイン再確認' : 'ログイン確認中' : syncState === 'error' ? '再同期' : syncState === 'syncing' || pendingCount ? '同期中' : '同期済み'}</span></button>
           {updateAvailable && <button className="update-pill" onClick={() => void applyUpdate()} aria-label="新しいバージョンに更新"><RotateCcw size={13}/><span>更新</span></button>}
           <span className="top-divider"/><button className="avatar mobile-profile" onClick={() => setSettings(true)} aria-label="アカウント設定">{user ? user.name.slice(0, 1) : <Settings2 size={17}/>}</button>
         </div>
@@ -306,7 +345,7 @@ export default function App() {
     <AnimatePresence>{toast && <motion.div className="toast glass" role="status" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: .18 }}><CheckCircle2 size={18}/><span>{toast.message}</span>{toast.undo && <button onClick={() => { toast.undo?.(); setToast(null); }}>元に戻す</button>}<button className="toast-close" aria-label="通知を閉じる" onClick={() => setToast(null)}><X size={14}/></button></motion.div>}</AnimatePresence>
     {editTask && <Editor task={editTask} close={() => setEditTask(null)} save={async patch => { if (await update(editTask, patch)) setEditTask(null); }} remove={async () => { if (await update(editTask, { deleted: true }, true)) setEditTask(null); }} restore={async () => { if (await update(editTask, { deleted: false }, true)) setEditTask(null); }}/ >}
     {settings && <Modal title="設定" close={() => setSettings(false)}><div className="settings-account"><span className="settings-avatar">{user ? user.name.slice(0, 1) : <Cloud size={26}/>}</span><strong>{user ? user.name : 'アカウント'}</strong><p>{user ? user.email : 'Googleログインで端末間を同期'}</p></div>
-      {user ? <><div className="setting-row"><Cloud size={18}/><span>{!online ? 'オフライン・端末に保存中' : pendingCount ? `${pendingCount}件の同期待ち` : syncState === 'error' ? '同期できませんでした' : '同期済み'}</span><button onClick={() => void runSync()}>再同期</button></div><button className="setting-row" onClick={() => void logout()}><LogOut size={18}/><span>ログアウト</span></button></> : <button className="google-button" onClick={login}><GoogleIcon/>Googleでログイン</button>}
+      {user && sessionVerified ? <><div className="setting-row"><Cloud size={18}/><span>{!online ? 'オフライン・端末に保存中' : pendingCount ? `${pendingCount}件の同期待ち` : syncState === 'error' ? '同期できませんでした' : '同期済み'}</span><button onClick={() => void runSync()}>再同期</button></div><button className="setting-row" onClick={() => void logout()}><LogOut size={18}/><span>ログアウト</span></button></> : <button className="google-button" onClick={login} disabled={!online}><GoogleIcon/>Googleでログイン</button>}
       <div className="settings-divider"/><button className="setting-row" onClick={exportData}><Download size={18}/><span>データを書き出す</span><small>JSON</small></button>
       {updateAvailable && <button className="setting-row" onClick={() => void applyUpdate()}><RotateCcw size={18}/><span>新しいバージョンに更新</span></button>}
       <a className="setting-row" href="/privacy.html" target="_blank" rel="noopener noreferrer"><FileText size={18}/><span>プライバシー</span></a>
