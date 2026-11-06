@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { readFile } from 'node:fs/promises';
 import app, { hash, type Env } from '../worker/index';
@@ -93,6 +93,39 @@ describe('Workers AIの接続と制限', () => {
   it('AIの不正応答を保存しない', async () => {
     env.AI = { run: async () => ({ response: 'not-json' }) } as unknown as Ai;
     expect((await request('/api/ai', body)).status).toBe(502);
+  });
+  it('候補0件は通信失敗にせず具体化の案内を返す', async () => {
+    env.AI = { run: async () => ({ choices: [{ finish_reason: 'stop', message: { content: '{"tasks":[]}' } }] }) } as unknown as Ai;
+    const r = await request('/api/ai', { ...body, text: '買い物リスト' });
+    expect(r.status).toBe(422);
+    expect(await r.json()).toMatchObject({ code: 'no_tasks', error: expect.stringContaining('もう少し詳しく') });
+    expect(await database.prepare('SELECT COUNT(*) AS n FROM tasks WHERE user_id=?').bind('user-a').first()).toEqual({ n: 1 });
+  });
+  it('JSONモードのオブジェクト応答も受け取れる', async () => {
+    env.AI = { run: async () => ({ response: { tasks: [{ text: '牛乳を買う', category: 'personal', due: null }] } }) } as unknown as Ai;
+    const r = await request('/api/ai', body);
+    expect(r.status).toBe(200); expect(await r.json()).toMatchObject({ tasks: [{ text: '牛乳を買う' }] });
+  });
+  it('Responses APIの推論項目を飛ばして最終結果を取得する', async () => {
+    env.AI = { run: async () => ({ output: [{ type: 'reasoning', summary: [] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '{"tasks":[{"text":"確認する","category":"work","due":null}]}' }] }] }) } as unknown as Ai;
+    const r = await request('/api/ai', body);
+    expect(r.status).toBe(200); expect(await r.json()).toMatchObject({ tasks: [{ text: '確認する' }] });
+  });
+  it('途中で打ち切られた結果を完成した候補として扱わない', async () => {
+    env.AI = { run: async () => ({ choices: [{ finish_reason: 'length', message: { content: '{"tasks":[{"text":"一部だけ"}]}' } }] }) } as unknown as Ai;
+    const r = await request('/api/ai', body);
+    expect(r.status).toBe(502); expect(await r.json()).toMatchObject({ code: 'truncated' });
+  });
+  it('接続障害の診断にメモ本文やプロバイダーの生エラーを残さない', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      env.AI = { run: async () => { throw new Error(`private-provider-detail: ${body.text}`); } } as unknown as Ai;
+      const r = await request('/api/ai', body);
+      expect(r.status).toBe(502); expect(await r.json()).toMatchObject({ code: 'unavailable' });
+      const logs = JSON.stringify(warn.mock.calls);
+      expect(logs).toContain('ai_failed'); expect(logs).not.toContain(body.text); expect(logs).not.toContain('private-provider-detail');
+    } finally { warn.mockRestore(); }
   });
   it('1日30回の上限を適用する', async () => {
     await database.prepare('UPDATE ai_usage SET count=30 WHERE user_id=?').bind('user-a').run();
